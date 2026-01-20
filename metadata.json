@@ -3,6 +3,7 @@
   "description": "A high-octane, next-generation messaging platform featuring dark neon aesthetics, AI-powered smart replies, and real-time speed analytics.",
   "requestFramePermissions": [
     "camera",
-    "microphone"
+    "microphone",
+    "geolocation"
   ]
 }

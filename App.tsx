@@ -12,6 +12,7 @@ import FamilyView from './components/FamilyView';
 import GossipView from './components/GossipView';
 import CallHistoryModal from './components/CallHistoryModal';
 import SubscriptionModal from './components/SubscriptionModal';
+import LocationScanner from './components/LocationScanner';
 import { INITIAL_CHATS, CURRENT_USER, ICONS } from './constants';
 import { Chat, Message, ChatType, VoiceProfile, User, ExpiryDuration } from './types';
 import { speakText, playUiSound, toggleEngineHum } from './services/audioService';
@@ -499,12 +500,7 @@ export const App: React.FC = () => {
             break;
         }
         case 'ai-activation': handleSendMessage("Nitro AI: Core conscious state requested. Monitoring sector...", "text", { isAi: true }); break;
-        case 'location': {
-            navigator.geolocation.getCurrentPosition(pos => {
-                onSendMessage(`[Grid Location Transmitted]: Lat ${pos.coords.latitude.toFixed(4)}, Lng ${pos.coords.longitude.toFixed(4)}`);
-            });
-            break;
-        }
+        case 'location': setIsLocationTracking(true); break;
     }
     if (tool !== 'ai-copilot') setIsMoreToolsOpen(false);
   };
@@ -670,6 +666,8 @@ export const App: React.FC = () => {
             </div>
           ) : activeTab === 'family' ? ( <FamilyView /> ) : activeTab === 'zone' ? ( <ZoneView isLightMode={false} onJoinRoom={() => {}} onJoinChallenge={() => {}} /> ) : activeTab === 'gossip' ? ( <GossipView /> ) : null}
         
+          <LocationScanner active={isLocationTracking} data={trackingData} />
+
           {analysisResult && (
               <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-[60] animate-in slide-in-from-bottom-4 w-11/12 max-w-sm">
                   <div className="bg-nitro-black/90 backdrop-blur-xl border border-nitro-magenta/50 rounded-3xl p-5 shadow-[0_0_30px_rgba(255,0,60,0.3)]">
@@ -834,6 +832,14 @@ export const App: React.FC = () => {
           </button>
         ))}
       </nav>
+      {isLocationTracking && (
+        <button 
+          onClick={() => setIsLocationTracking(false)}
+          className="fixed bottom-32 left-1/2 -translate-x-1/2 z-[50] bg-nitro-magenta text-white px-8 py-3 rounded-full font-orbitron font-black text-xs uppercase shadow-[0_0_30px_rgba(255,0,60,0.6)] animate-bounce border-2 border-white/20"
+        >
+          Exit Grid Scanner
+        </button>
+      )}
     </div>
   );
 };
