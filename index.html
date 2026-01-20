@@ -14,8 +14,13 @@
     "react/jsx-runtime": "https://esm.sh/react@18.2.0/jsx-runtime",
     "@google/genai": "https://esm.sh/@google/genai",
     "react-easy-crop": "https://esm.sh/react-easy-crop@5.2.0",
+    "firebase/app": "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js",
+    "firebase/firestore": "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js",
+    "firebase/auth": "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js",
+    "firebase/storage": "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js",
     "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "react/": "https://esm.sh/react@^19.2.3/"
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "firebase/": "https://esm.sh/firebase@^12.8.0/"
   }
 }
 </script>
@@ -57,21 +62,15 @@
                             '50%': { transform: 'translate(50%, 0%) rotate(0deg)', opacity: '1' },
                             '100%': { transform: 'translate(200%, -50%) rotate(45deg)', opacity: '0' }
                         },
-                        'smoke-rise': {
-                            '0%': { transform: 'translateY(20px) scale(0.5)', opacity: '0' },
-                            '50%': { opacity: '0.4' },
-                            '100%': { transform: 'translateY(-100px) scale(2)', opacity: '0' }
-                        },
                         'flicker': {
-                            '0%, 18%, 22%, 25%, 53%, 57%, 100%': { opacity: '1', filter: 'brightness(1.2) drop-shadow(0 0 10px var(--nitro-primary))' },
-                            '20%, 24%, 55%': { opacity: '0.3', filter: 'brightness(0.5) drop-shadow(0 0 0px var(--nitro-primary))' }
+                            '0%, 18%, 22%, 25%, 53%, 57%, 100%': { opacity: '1', filter: 'brightness(1.2)' },
+                            '20%, 24%, 55%': { opacity: '0.3', filter: 'brightness(0.5)' }
                         }
                     },
                     animation: {
                         'nitro-shake': 'nitro-shake 0.4s cubic-bezier(.36,.07,.19,.97) both',
                         'drag-race': 'drag-race 2s linear forwards',
                         'drift-arc': 'drift-arc 2.5s ease-in-out forwards',
-                        'smoke-rise': 'smoke-rise 3s ease-out forwards',
                         'flicker': 'flicker 2s infinite'
                     }
                 }
@@ -98,26 +97,6 @@
             --nitro-accent: #00f3ff;
         }
 
-        @keyframes neon-glow {
-            0%, 100% { text-shadow: 0 0 10px var(--nitro-primary), 0 0 20px rgba(0, 243, 255, 0.2); }
-            50% { text-shadow: 0 0 20px var(--nitro-primary), 0 0 40px rgba(0, 243, 255, 0.4); }
-        }
-
-        @keyframes pulse-ring {
-            0% { transform: scale(0.8); opacity: 0.5; }
-            100% { transform: scale(1.5); opacity: 0; }
-        }
-
-        @keyframes speed-blur {
-            0% { filter: blur(0px); opacity: 1; transform: scale(1); }
-            50% { filter: blur(4px); opacity: 0.8; transform: scale(1.02); }
-            100% { filter: blur(0px); opacity: 1; transform: scale(1); }
-        }
-
-        .nitro-boost-active {
-            animation: speed-blur 0.3s ease-in-out;
-        }
-
         .neon-primary { color: var(--nitro-primary); }
         .bg-nitro-primary { background-color: var(--nitro-primary); }
         .border-nitro-primary { border-color: var(--nitro-primary); }
@@ -127,25 +106,6 @@
         .hide-scrollbar::-webkit-scrollbar { display: none; }
         .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         
-        input[type="datetime-local"]::-webkit-calendar-picker-indicator {
-            filter: invert(1) sepia(100%) saturate(10000%) hue-rotate(40deg);
-            cursor: pointer;
-        }
-
-        .fab-pulse::before {
-            content: '';
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            border-radius: 50%;
-            background: var(--nitro-primary);
-            animation: pulse-ring 2s infinite;
-            z-index: -1;
-        }
-
-        .status-glow-online { box-shadow: 0 0 10px #39ff14; }
-        .status-glow-speeding { box-shadow: 0 0 10px #00f3ff; }
-
         body { background-color: var(--app-bg); transition: background-color 0.3s ease; }
     </style>
 </head>

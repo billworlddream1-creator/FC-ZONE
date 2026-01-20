@@ -1,5 +1,8 @@
 
 import React, { useState, useEffect, useRef } from 'react';
+import { collection, query, orderBy, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, setDoc, getDoc, deleteDoc } from "firebase/firestore";
+import { onAuthStateChanged } from "firebase/auth";
+import { db, auth } from "./firebase";
 import ChatList from './components/ChatList';
 import ChatWindow from './components/ChatWindow';
 import Dashboard from './components/Dashboard';
@@ -7,10 +10,12 @@ import AuthScreen from './components/AuthScreen';
 import ZoneView from './components/ZoneView';
 import FamilyView from './components/FamilyView';
 import GossipView from './components/GossipView';
-import { INITIAL_CHATS, CURRENT_USER, ICONS, MOCK_ROOMS, MOCK_CHALLENGES } from './constants';
-import { Chat, Message, ChatType, ScheduledMessage, AlertReminder, VoiceProfile, User, Room, RaceChallenge, ExpiryDuration, VoiceFilter } from './types';
-import { speakText, playUiSound } from './services/audioService';
-import { nitroAssistantQuery } from './services/geminiService';
+import CallHistoryModal from './components/CallHistoryModal';
+import SubscriptionModal from './components/SubscriptionModal';
+import { INITIAL_CHATS, CURRENT_USER, ICONS } from './constants';
+import { Chat, Message, ChatType, VoiceProfile, User, ExpiryDuration } from './types';
+import { speakText, playUiSound, toggleEngineHum } from './services/audioService';
+import { nitroAssistantQuery, generateOfflineReply, analyzeSentimentAndStyle, generateNitroBotResponse } from './services/geminiService';
 
 const EXPIRY_MAP: Record<string, number> = {
   '24h': 1000 * 60 * 60 * 24,
@@ -18,317 +23,679 @@ const EXPIRY_MAP: Record<string, number> = {
   '1m': 1000 * 60 * 60 * 24 * 30,
 };
 
-const App: React.FC = () => {
-  const [chats, setChats] = useState<Chat[]>(INITIAL_CHATS);
-  const [selectedChatId, setSelectedChatId] = useState<string | null>(INITIAL_CHATS[0].id);
-  const [activeTab, setActiveTab] = useState<'chats' | 'family' | 'zone' | 'gossip' | 'settings'>('chats');
-  const [isRedTheme, setIsRedTheme] = useState(false);
-  const [isLightMode, setIsLightMode] = useState(false);
+export const App: React.FC = () => {
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [trashMessages, setTrashMessages] = useState<Message[]>([]);
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'chats' | 'family' | 'zone' | 'gossip' | 'settings' | 'tools'>('chats');
   const [isRacerProfileOpen, setIsRacerProfileOpen] = useState(false);
+  const [dashboardTab, setDashboardTab] = useState<'stats' | 'engine' | 'settings' | 'voice' | 'vibe' | 'trash' | undefined>(undefined);
   const [isChatListOpen, setIsChatListOpen] = useState(false);
+  const [isMoreToolsOpen, setIsMoreToolsOpen] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isSubscriptionOpen, setIsSubscriptionOpen] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [zoomedImage, setZoomedImage] = useState<string | null>(null);
+  
+  // Profile Menu State
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  
+  // Location Tracker State
+  const [isLocationTracking, setIsLocationTracking] = useState(false);
+  const [trackingData, setTrackingData] = useState<{lat: string, lng: string, dist: string} | null>(null);
+
+  // Analysis State
+  const [analysisResult, setAnalysisResult] = useState<{mood: string, style: string, intent: string} | null>(null);
+  
   const [voiceProfile, setVoiceProfile] = useState<VoiceProfile>('off');
   const [chatBgColor, setChatBgColor] = useState('#0a192f');
-  const [currentUser, setCurrentUser] = useState<User>({
-    ...CURRENT_USER,
-    voiceFilter: { pitch: 1.0, echo: 0, reverb: 0 },
-    voicePresets: { 'Default': { pitch: 1.0, echo: 0, reverb: 0 }, 'Nitro': { pitch: 1.5, echo: 0.2, reverb: 0.1 } }
-  });
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [location, setLocation] = useState({ lat: 35.6895, lng: 139.6917, sector: 'SHIBUYA_DRIFT' });
   
-  const [globalAlert, setGlobalAlert] = useState<{ topic: string, type: 'message' | 'reminder' } | null>(null);
   const lastActivityRef = useRef<number>(Date.now());
+  const chatWindowRef = useRef<any>(null);
+  const profileMenuRef = useRef<HTMLDivElement>(null);
 
-  const selectedChat = chats.find(c => c.id === selectedChatId) || chats[0];
+  const selectedChat = chats.find(c => c.id === selectedChatId);
 
+  // Update background based on user preference
   useEffect(() => {
-    const body = document.body;
-    const html = document.documentElement;
-    if (isRedTheme) body.classList.add('theme-red'); else body.classList.remove('theme-red');
-    if (isLightMode) { html.classList.add('light'); html.classList.remove('dark'); } else { html.classList.remove('light'); html.classList.add('dark'); }
-  }, [isRedTheme, isLightMode]);
+      if (currentUser?.themePreference) {
+          setChatBgColor(currentUser.themePreference);
+      }
+  }, [currentUser?.themePreference]);
 
+  // Click outside listener for profile menu
   useEffect(() => {
-    const interval = setInterval(() => {
-        const now = Date.now();
-        
-        // Auto AI Response if silent for 45 seconds
-        if (isAuthenticated && (now - lastActivityRef.current > 45000) && selectedChat) {
-          lastActivityRef.current = now; // Reset timer
-          handleSendMessage("Nitro AI Check: The sector is silent. Any race updates for the team?", 'text');
+      const handleClickOutside = (event: MouseEvent) => {
+          if (profileMenuRef.current && !profileMenuRef.current.contains(event.target as Node)) {
+              setIsProfileMenuOpen(false);
+          }
+      };
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Location Tracker Effect
+  useEffect(() => {
+    let interval: any;
+    if (isLocationTracking) {
+      setTrackingData(null); // Reset to show scanning state
+      playUiSound('click');
+      let steps = 0;
+      interval = setInterval(() => {
+        steps++;
+        if (steps > 5) {
+           // Locked on
+           setTrackingData({
+               lat: (34.0522 + (Math.random() - 0.5) * 0.1).toFixed(4),
+               lng: (-118.2437 + (Math.random() - 0.5) * 0.1).toFixed(4),
+               dist: (Math.random() * 5 + 0.5).toFixed(1) + ' KM'
+           });
+           playUiSound('alarm'); // Lock sound
+           clearInterval(interval);
         }
-
-        setChats(prevChats => prevChats.map(chat => {
-            let updated = false;
-            let messages = chat.messages;
-            let scheduledMessages = chat.scheduledMessages || [];
-            let alertReminders = chat.alertReminders || [];
-
-            const validMessages = messages.filter(m => !m.expiryTimestamp || m.expiryTimestamp > now);
-            if (validMessages.length !== messages.length) {
-                messages = validMessages;
-                updated = true;
-            }
-
-            const messagesToSend = scheduledMessages.filter(m => m.scheduledFor <= now);
-            if (messagesToSend.length > 0) {
-                const processed = messagesToSend.map(m => ({ 
-                    ...m, 
-                    status: 'sent' as const, 
-                    timestamp: now, 
-                    id: `sent-${m.id}-${now}`,
-                    expiryTimestamp: chat.expiryDuration && chat.expiryDuration !== 'off' ? now + EXPIRY_MAP[chat.expiryDuration] : undefined
-                }));
-                messages = [...messages, ...processed];
-                scheduledMessages = scheduledMessages.filter(m => m.scheduledFor > now);
-                if (currentUser.soundEnabled) playUiSound('alarm');
-                setGlobalAlert({ topic: "Injection Successful", type: 'message' });
-                updated = true;
-            }
-
-            const activeAlerts = alertReminders.filter(a => a.scheduledFor <= now);
-            if (activeAlerts.length > 0) {
-                const lastAlert = activeAlerts[activeAlerts.length - 1];
-                alertReminders = alertReminders.filter(a => a.scheduledFor > now);
-                if (currentUser.soundEnabled) playUiSound('alarm');
-                setGlobalAlert({ topic: lastAlert.topic, type: 'reminder' });
-                updated = true;
-            }
-
-            if (updated) {
-              return { ...chat, messages, scheduledMessages, alertReminders, timestamp: now };
-            }
-            return chat;
-        }));
-
-        // Mock movement
-        setLocation(prev => ({ ...prev, lat: prev.lat + (Math.random() * 0.0001 - 0.00005), lng: prev.lng + (Math.random() * 0.0001 - 0.00005) }));
-    }, 1000);
+      }, 500);
+    } else {
+        setTrackingData(null);
+    }
     return () => clearInterval(interval);
-  }, [currentUser.soundEnabled, isAuthenticated, selectedChatId]);
+  }, [isLocationTracking]);
 
-  const handleAuthenticated = (userData: Partial<User>) => {
-    setCurrentUser(prev => ({
-      ...prev,
-      ...userData,
-      id: 'me',
-      points: 100,
-      xp: 0,
-      level: 1,
-      badge: 'Rookie Racer',
-      status: 'online',
-      autoReadDocuments: false,
-      stealthMode: false,
-      soundEnabled: true,
-      bubbleColor: '#1e3a8a',
-      lowBandwidthMode: false,
-      avatar: `https://picsum.photos/seed/${userData.name}/200`,
-      voiceFilter: { pitch: 1.0, echo: 0, reverb: 0 },
-      voicePresets: { 'Default': { pitch: 1.0, echo: 0, reverb: 0 } }
-    }));
-    setIsAuthenticated(true);
-    if (voiceProfile !== 'off') speakText(`Welcome to the grid, ${userData.name}.`, voiceProfile, currentUser.voiceFilter);
+  const handleSelectChat = (id: string) => {
+    setSelectedChatId(id);
+    setIsChatListOpen(false);
+    if (currentUser?.soundEnabled) playUiSound('click', currentUser.soundPack);
   };
 
-  const handleSendMessage = async (text: string, type: 'text' | 'file' | 'image' = 'text', fileData?: any) => {
-    if (!selectedChatId) return;
-    lastActivityRef.current = Date.now();
+  const handleUpdateUser = (updated: Partial<User>) => {
+    setCurrentUser(prev => prev ? { ...prev, ...updated } : null);
+  };
 
-    const expiryTime = selectedChat.expiryDuration && selectedChat.expiryDuration !== 'off' ? Date.now() + EXPIRY_MAP[selectedChat.expiryDuration] : undefined;
-    const newMessage: Message = {
-      id: Math.random().toString(36).substr(2, 9),
-      senderId: currentUser.id,
-      senderName: currentUser.name,
-      text,
-      timestamp: Date.now(),
-      type: type as any,
-      status: 'sent',
-      fileData: fileData,
-      expiryTimestamp: expiryTime
+  const handleUpdateWallpaper = async (chatId: string, wallpaper: string) => {
+    if (!currentUser) return;
+    if (currentUser.id === 'demo-pilot') {
+        setChats(prev => prev.map(c => c.id === chatId ? { ...c, wallpaper } : c));
+    } else {
+        try {
+            await updateDoc(doc(db, "chats", chatId), { wallpaper });
+        } catch (e) {
+            console.error("Failed to update wallpaper", e);
+        }
+    }
+    if (currentUser.soundEnabled) playUiSound('click', currentUser.soundPack);
+  };
+
+  const handleUpdateExpiryDuration = async (chatId: string, duration: ExpiryDuration) => {
+    if (!currentUser) return;
+    if (currentUser.id === 'demo-pilot') {
+        setChats(prev => prev.map(c => c.id === chatId ? { ...c, expiryDuration: duration } : c));
+    } else {
+        try {
+            await updateDoc(doc(db, "chats", chatId), { expiryDuration: duration });
+        } catch (e) {
+            console.error("Failed to update expiry", e);
+        }
+    }
+    if (currentUser.soundEnabled) playUiSound('click', currentUser.soundPack);
+  };
+
+  const handleToggleBackgroundMusic = () => {
+      if (!currentUser) return;
+      const newState = !currentUser.backgroundMusic;
+      handleUpdateUser({ backgroundMusic: newState });
+      toggleEngineHum(newState);
+      playUiSound(newState ? 'nitro' : 'click', currentUser.soundPack);
+  };
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setIsAuthenticated(true);
+        setCurrentUser({
+          ...CURRENT_USER,
+          id: user.uid,
+          name: user.displayName || 'Nitro Rider',
+          email: user.email || '',
+          avatar: user.photoURL || `https://picsum.photos/seed/${user.uid}/200`
+        });
+      } else {
+        if (!isAuthenticated) {
+          setIsAuthenticated(false);
+          setCurrentUser(null);
+        }
+      }
+    });
+
+    const handleDemoAuth = () => {
+      setIsAuthenticated(true);
+      setCurrentUser({
+        ...CURRENT_USER,
+        id: 'demo-pilot',
+        name: 'Demo Pilot',
+        status: 'online'
+      });
+      setChats(INITIAL_CHATS);
+      setSelectedChatId(INITIAL_CHATS[0].id);
     };
 
-    setChats(prev => prev.map(chat => chat.id === selectedChatId ? { ...chat, messages: [...chat.messages, newMessage], lastMessage: text, timestamp: Date.now() } : chat));
-    setCurrentUser(prev => ({ ...prev, xp: prev.xp + 5, points: prev.points + 5 }));
+    window.addEventListener('nitro-demo-auth', handleDemoAuth);
+    return () => {
+      unsubscribe();
+      window.removeEventListener('nitro-demo-auth', handleDemoAuth);
+    };
+  }, [isAuthenticated]);
 
-    if (type === 'text' && (selectedChat.participants.length <= 1 || selectedChat.participants.some(p => p.status === 'offline'))) {
-        setTimeout(async () => {
-            const aiResponseText = await nitroAssistantQuery(`User sent: "${text}". Give a quick, racing response.`);
-            const aiMessage: Message = {
-                id: Math.random().toString(36).substr(2, 9),
-                senderId: 'nitro-ai',
-                senderName: 'Nitro AI',
-                text: aiResponseText,
-                timestamp: Date.now(),
-                type: 'text',
-                status: 'sent',
-                isAi: true,
-                expiryTimestamp: expiryTime
-            };
-            setChats(prev => prev.map(chat => chat.id === selectedChatId ? { ...chat, messages: [...chat.messages, aiMessage], lastMessage: aiResponseText, timestamp: Date.now() } : chat));
-        }, 1500);
+  useEffect(() => {
+    if (!isAuthenticated || currentUser?.id === 'demo-pilot') return;
+    const q = query(collection(db, "chats"), orderBy("timestamp", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetchedChats = snapshot.docs.map(doc => ({ id: doc.id, expiryDuration: 'off', ...doc.data(), messages: [] } as Chat));
+      if (fetchedChats.length > 0) {
+        setChats(fetchedChats);
+        if (!selectedChatId) setSelectedChatId(fetchedChats[0].id);
+      } else {
+        setChats(INITIAL_CHATS);
+      }
+    });
+    return () => unsubscribe();
+  }, [isAuthenticated, currentUser?.id]);
+
+  useEffect(() => {
+    if (!selectedChatId || !isAuthenticated || currentUser?.id === 'demo-pilot') return;
+    const q = query(collection(db, "chats", selectedChatId, "messages"), orderBy("timestamp", "asc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Message));
+      setChats(prev => prev.map(c => c.id === selectedChatId ? { ...c, messages: msgs } : c));
+    });
+    return () => unsubscribe();
+  }, [selectedChatId, isAuthenticated, currentUser?.id]);
+
+  const handleSendMessage = async (text: string, type: string = 'text', fileData?: any) => {
+    if (!selectedChatId || !currentUser) return;
+    lastActivityRef.current = Date.now();
+
+    let expiryTimestamp: number | undefined;
+    if (selectedChat?.expiryDuration && selectedChat.expiryDuration !== 'off') {
+        expiryTimestamp = Date.now() + EXPIRY_MAP[selectedChat.expiryDuration];
+    }
+
+    const newMessage: Message = { 
+        id: Date.now().toString(), 
+        senderId: currentUser.id, 
+        senderName: currentUser.name, 
+        text, 
+        timestamp: Date.now(), 
+        type: type as any, 
+        status: 'sent', 
+        fileData,
+        expiryTimestamp 
+    };
+    
+    // Helper to add bot message
+    const addBotMessage = async (botText: string) => {
+        const botMsg: Message = { 
+            id: (Date.now() + 100).toString(), 
+            senderId: 'nitro-bot', 
+            senderName: 'Nitro Bot', 
+            text: botText, 
+            timestamp: Date.now(), 
+            type: 'text', 
+            status: 'delivered', 
+            isAi: true,
+            expiryTimestamp: selectedChat?.expiryDuration !== 'off' ? Date.now() + EXPIRY_MAP[selectedChat!.expiryDuration!] : undefined
+        };
+        
+        if (currentUser.id === 'demo-pilot') {
+            setChats(prev => prev.map(c => c.id === selectedChatId ? { ...c, messages: [...(c.messages || []), botMsg], lastMessage: botText } : c));
+        } else {
+            await addDoc(collection(db, "chats", selectedChatId, "messages"), { ...botMsg, fileData: null }); 
+        }
+        if(currentUser.soundEnabled) playUiSound('receive', currentUser.soundPack);
+        setIsTyping(false);
+    };
+
+    if (currentUser.id === 'demo-pilot') {
+      setChats(prev => prev.map(c => c.id === selectedChatId ? { ...c, messages: [...(c.messages || []), newMessage], lastMessage: text } : c));
+      if (currentUser.soundEnabled) playUiSound('send', currentUser.soundPack);
+      
+      const chat = chats.find(c => c.id === selectedChatId);
+      const recipient = chat?.participants.find(p => p.id !== currentUser.id);
+
+      if (currentUser.aiCoPilot) {
+          setTimeout(() => setIsTyping(true), 800);
+          setTimeout(async () => {
+              const history = chat?.messages.slice(-5).map(m => m.text) || [];
+              const reply = await generateNitroBotResponse(history, text);
+              await addBotMessage(reply);
+          }, 2000);
+          return;
+      }
+
+      if (recipient && (recipient.status === 'offline' || recipient.id === 'dom')) {
+          setTimeout(() => setIsTyping(true), 1500);
+          setTimeout(async () => {
+              const reply = await generateOfflineReply(currentUser.name, recipient.name, text);
+              await addBotMessage(reply); 
+          }, 3500);
+      }
+      return;
+    }
+
+    try {
+      const msgCollection = collection(db, "chats", selectedChatId, "messages");
+      await addDoc(msgCollection, { ...newMessage, fileData: fileData || null });
+      await updateDoc(doc(db, "chats", selectedChatId), { lastMessage: text, timestamp: Date.now() });
+      if (currentUser.soundEnabled) playUiSound('send', currentUser.soundPack);
+
+      const chat = chats.find(c => c.id === selectedChatId);
+      const recipient = chat?.participants.find(p => p.id !== currentUser.id);
+      
+      if (currentUser.aiCoPilot) {
+          setTimeout(() => setIsTyping(true), 800);
+          setTimeout(async () => {
+              const history = chat?.messages.slice(-5).map(m => m.text) || [];
+              const reply = await generateNitroBotResponse(history, text);
+              await addBotMessage(reply);
+          }, 2000);
+          return;
+      }
+
+      if (recipient && (recipient.status === 'offline' || recipient.id === 'dom')) {
+             setTimeout(() => setIsTyping(true), 1000);
+             setTimeout(async () => {
+                 const reply = await generateOfflineReply(currentUser.name, recipient.name, text);
+                 await addBotMessage(reply);
+             }, 3500);
+      }
+
+    } catch (err) {
+      console.error("Message send failed:", err);
     }
   };
 
-  const handleDeleteMessage = (chatId: string, messageId: string) => {
-    setChats(prev => prev.map(chat => chat.id === chatId ? { ...chat, messages: chat.messages.filter(m => m.id !== messageId) } : chat));
-    if (currentUser.soundEnabled) playUiSound('click');
+  const handleDeleteMessage = async (chatId: string, messageId: string) => {
+    if (!currentUser) return;
+    
+    // Find the message to move to salvage
+    const targetChat = chats.find(c => c.id === chatId);
+    const targetMsg = targetChat?.messages.find(m => m.id === messageId);
+
+    if (targetMsg) {
+        const salvagedMsg = { 
+            ...targetMsg, 
+            originalChatId: chatId, 
+            deletedAt: Date.now() 
+        };
+        setTrashMessages(prev => [salvagedMsg, ...prev]);
+    }
+
+    if (currentUser.id === 'demo-pilot') {
+      setChats(prev => prev.map(c => {
+        if (c.id === chatId) {
+           return { ...c, messages: c.messages.filter(m => m.id !== messageId) };
+        }
+        return c;
+      }));
+      if (currentUser.soundEnabled) playUiSound('click', currentUser.soundPack);
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, "chats", chatId, "messages", messageId));
+      if (currentUser.soundEnabled) playUiSound('click', currentUser.soundPack);
+    } catch (err) {
+      console.error("Delete failed", err);
+    }
   };
 
-  const handleTogglePinMessage = (chatId: string, messageId: string) => {
-    setChats(prev => prev.map(chat => chat.id === chatId ? { ...chat, messages: chat.messages.map(m => m.id === messageId ? { ...m, isPinned: !m.isPinned } : m) } : chat));
-    if (currentUser.soundEnabled) playUiSound('click');
+  const handleRestoreMessage = async (messageId: string) => {
+    if (!currentUser) return;
+    const msgToRestore = trashMessages.find(m => m.id === messageId);
+    if (!msgToRestore || !msgToRestore.originalChatId) return;
+
+    if (currentUser.id === 'demo-pilot') {
+        setChats(prev => prev.map(c => {
+            if (c.id === msgToRestore.originalChatId) {
+                return { ...c, messages: [...c.messages, { ...msgToRestore, deletedAt: undefined, originalChatId: undefined }].sort((a,b) => a.timestamp - b.timestamp) };
+            }
+            return c;
+        }));
+        setTrashMessages(prev => prev.filter(m => m.id !== messageId));
+        if (currentUser.soundEnabled) playUiSound('levelUp', currentUser.soundPack);
+    } else {
+        try {
+            const { deletedAt, originalChatId, ...cleanMsg } = msgToRestore;
+            await addDoc(collection(db, "chats", originalChatId, "messages"), { ...cleanMsg });
+            setTrashMessages(prev => prev.filter(m => m.id !== messageId));
+            if (currentUser.soundEnabled) playUiSound('levelUp', currentUser.soundPack);
+        } catch (e) {
+            console.error("Restore failed", e);
+        }
+    }
   };
 
-  const handleUpdateExpiryDuration = (chatId: string, duration: ExpiryDuration) => {
-    setChats(prev => prev.map(chat => chat.id === chatId ? { ...chat, expiryDuration: duration } : chat));
-    if (currentUser.soundEnabled) playUiSound('click');
+  const handlePermanentDelete = (messageId: string) => {
+    setTrashMessages(prev => prev.filter(m => m.id !== messageId));
+    if (currentUser?.soundEnabled) playUiSound('click', currentUser.soundPack);
   };
 
-  const handleScheduleMessage = (text: string, deliveryTime: number) => {
-    if (!selectedChatId) return;
-    const newScheduledMessage: ScheduledMessage = { id: Math.random().toString(36).substr(2, 9), senderId: currentUser.id, senderName: currentUser.name, text, timestamp: Date.now(), type: 'text', status: 'sent', scheduledFor: deliveryTime };
-    setChats(prev => prev.map(chat => chat.id === selectedChatId ? { ...chat, scheduledMessages: [...(chat.scheduledMessages || []), newScheduledMessage] } : chat));
-    if (currentUser.soundEnabled) playUiSound('click');
+  const handleEmptySalvage = () => {
+      setTrashMessages([]);
+      if (currentUser?.soundEnabled) playUiSound('alarm', currentUser.soundPack);
   };
 
-  const handleSetAlert = (topic: string, deliveryTime: number) => {
-    if (!selectedChatId) return;
-    const newAlert: AlertReminder = { id: Math.random().toString(36).substr(2, 9), chatId: selectedChatId, topic, scheduledFor: deliveryTime };
-    setChats(prev => prev.map(chat => chat.id === selectedChatId ? { ...chat, alertReminders: [...(chat.alertReminders || []), newAlert] } : chat));
-    if (currentUser.soundEnabled) playUiSound('click');
+  const handleReactToMessage = async (messageId: string, emoji: string) => {
+    if (!selectedChatId || !currentUser) return;
+
+    if (currentUser.id === 'demo-pilot') {
+      setChats(prev => prev.map(c => {
+        if (c.id === selectedChatId) {
+          const updatedMessages = c.messages.map(m => {
+            if (m.id === messageId) {
+              const reactions = { ...(m.reactions || {}) };
+              const currentUsers = reactions[emoji] || [];
+              if (currentUsers.includes(currentUser.id)) {
+                reactions[emoji] = currentUsers.filter(uid => uid !== currentUser.id);
+                if (reactions[emoji].length === 0) delete reactions[emoji];
+              } else {
+                reactions[emoji] = [...currentUsers, currentUser.id];
+              }
+              return { ...m, reactions };
+            }
+            return m;
+          });
+          return { ...c, messages: updatedMessages };
+        }
+        return c;
+      }));
+      return;
+    }
+
+    try {
+      const msgRef = doc(db, "chats", selectedChatId, "messages", messageId);
+      const msgSnap = await getDoc(msgRef);
+      if (msgSnap.exists()) {
+        const data = msgSnap.data() as Message;
+        const reactions = { ...(data.reactions || {}) };
+        const currentUsers = reactions[emoji] || [];
+        if (currentUsers.includes(currentUser.id)) {
+          reactions[emoji] = currentUsers.filter(uid => uid !== currentUser.id);
+          if (reactions[emoji].length === 0) delete reactions[emoji];
+        } else {
+          reactions[emoji] = [...currentUsers, currentUser.id];
+        }
+        await updateDoc(msgRef, { reactions });
+      }
+    } catch (err) {
+      console.error("Reaction failed:", err);
+    }
   };
 
-  const handleCancelScheduledMessage = (chatId: string, messageId: string) => {
-    setChats(prev => prev.map(chat => chat.id === chatId ? { ...chat, scheduledMessages: (chat.scheduledMessages || []).filter(m => m.id !== messageId), alertReminders: (chat.alertReminders || []).filter(a => a.id !== messageId) } : chat));
+  const handleTogglePinChat = async (chatId: string) => {
+      if (!currentUser) return;
+      if (currentUser.id === 'demo-pilot') {
+          setChats(prev => prev.map(c => c.id === chatId ? { ...c, isPinned: !c.isPinned } : c));
+          if (currentUser.soundEnabled) playUiSound('click', currentUser.soundPack);
+          return;
+      }
+      setChats(prev => prev.map(c => c.id === chatId ? { ...c, isPinned: !c.isPinned } : c));
+      if (currentUser.soundEnabled) playUiSound('click', currentUser.soundPack);
   };
 
-  const handleUpdateWallpaper = (chatId: string, wallpaper: string) => {
-    setChats(prev => prev.map(chat => (chat.id === chatId ? { ...chat, wallpaper } : chat)));
+  const handleTogglePinMessage = async (chatId: string, messageId: string) => {
+      if (!currentUser) return;
+      
+      if (currentUser.id === 'demo-pilot') {
+          setChats(prev => prev.map(c => {
+              if (c.id === chatId) {
+                  return {
+                      ...c,
+                      messages: c.messages.map(m => m.id === messageId ? { ...m, isPinned: !m.isPinned } : m)
+                  };
+              }
+              return c;
+          }));
+          if (currentUser.soundEnabled) playUiSound('click', currentUser.soundPack);
+          return;
+      }
+
+      try {
+          const msgRef = doc(db, "chats", chatId, "messages", messageId);
+          const msgSnap = await getDoc(msgRef);
+          if (msgSnap.exists()) {
+              const currentPinned = msgSnap.data().isPinned || false;
+              await updateDoc(msgRef, { isPinned: !currentPinned });
+              if (currentUser.soundEnabled) playUiSound('click', currentUser.soundPack);
+          }
+      } catch (err) {
+          console.error("Pinning failed:", err);
+      }
   };
 
-  const handleSelectChat = (id: string) => {
-    if (currentUser.soundEnabled) playUiSound('click');
-    setSelectedChatId(id);
-    setIsChatListOpen(false);
-    setActiveTab('chats');
+  const handleToolTrigger = async (tool: string, value?: any) => {
+    if (currentUser?.soundEnabled) playUiSound('click', currentUser.soundPack);
+    switch(tool) {
+        case 'nitro': chatWindowRef.current?.handleNitroBoost(); break;
+        case 'translate': chatWindowRef.current?.handleTranslate(); break;
+        case 'analyzer': chatWindowRef.current?.handleContextAnalysis(); break;
+        case 'timer': chatWindowRef.current?.setIsScheduling(true); break;
+        case 'upload': chatWindowRef.current?.triggerFileUpload(); break;
+        case 'cockpit': setIsRacerProfileOpen(true); setDashboardTab('stats'); break;
+        case 'history': setIsHistoryOpen(true); break;
+        case 'mood-scanner': {
+            if (!selectedChat) {
+                alert("Select a chat to scan mood.");
+                break;
+            }
+            const lastMsg = selectedChat.messages.filter(m => m.senderId !== currentUser?.id).pop();
+            if (lastMsg) {
+                const result = await analyzeSentimentAndStyle(lastMsg.text);
+                setAnalysisResult(result);
+                playUiSound('levelUp', currentUser?.soundPack);
+            } else {
+                alert("No recent messages to analyze.");
+            }
+            break;
+        }
+        case 'ai-activation': handleSendMessage("Nitro AI: Core conscious state requested. Monitoring sector...", "text", { isAi: true }); break;
+        case 'location': {
+            navigator.geolocation.getCurrentPosition(pos => {
+                onSendMessage(`[Grid Location Transmitted]: Lat ${pos.coords.latitude.toFixed(4)}, Lng ${pos.coords.longitude.toFixed(4)}`);
+            });
+            break;
+        }
+    }
+    if (tool !== 'ai-copilot') setIsMoreToolsOpen(false);
   };
 
-  const handleJoinRoom = (room: Room) => {
-    if (currentUser.soundEnabled) playUiSound('click');
-    const newRoomChat: Chat = { id: room.id, name: room.name, type: ChatType.GROUP, lastMessage: `Joined the room: ${room.topic}`, timestamp: Date.now(), unreadCount: 0, avatar: `https://picsum.photos/seed/room-${room.id}/200`, participants: [currentUser], messages: [], scheduledMessages: [], alertReminders: [], isTyping: false };
-    setChats(prev => [newRoomChat, ...prev]);
-    setSelectedChatId(room.id);
-    setActiveTab('chats');
-  };
+  const onSendMessage = (text: string) => handleSendMessage(text);
 
-  const handleJoinChallenge = (challenge: RaceChallenge) => {
-    if (currentUser.soundEnabled) playUiSound('levelUp');
-    alert(`RACE INITIATED: ${challenge.title}.`);
-  };
+  if (!isAuthenticated) return <AuthScreen onAuthenticated={() => {}} />;
+  if (!currentUser) return <div className="h-screen w-full bg-nitro-black flex items-center justify-center font-orbitron text-nitro-cyan animate-pulse">Initializing Nitro Core...</div>;
 
-  const handleToggleVoice = () => {
-    const profiles: VoiceProfile[] = ['off', 'male', 'female'];
-    const currentIdx = profiles.indexOf(voiceProfile);
-    const nextIdx = (currentIdx + 1) % profiles.length;
-    setVoiceProfile(profiles[nextIdx]);
-    if (currentUser.soundEnabled) playUiSound('click');
-  };
-
-  const handleToggleSound = () => {
-    const next = !currentUser.soundEnabled;
-    setCurrentUser(prev => ({ ...prev, soundEnabled: next }));
-    if (next) playUiSound('click');
-  };
-
-  const handleLinkDevice = () => { if (currentUser.soundEnabled) playUiSound('click'); alert("Grid Sync established."); };
-  const handleShareZone = () => { if (currentUser.soundEnabled) playUiSound('click'); alert("Sector link copied."); };
-
-  if (!isAuthenticated) return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  const currentMessages = (selectedChat?.messages || []).filter(m => !m.expiryTimestamp || m.expiryTimestamp > Date.now());
 
   return (
-    <div className={`flex flex-col h-screen w-full overflow-hidden font-inter transition-colors duration-500 bg-nitro-black`}>
-      <header className={`px-4 sm:px-6 py-3 flex items-center justify-between z-50 border-b-2 transition-all duration-500 backdrop-blur-xl ${isRedTheme ? 'bg-nitro-magenta/10 border-nitro-magenta/40' : 'bg-nitro-cyan/10 border-nitro-cyan/40'} shadow-lg`}>
+    <div className={`flex flex-col h-screen w-full overflow-hidden font-inter bg-nitro-black`} style={{ backgroundColor: chatBgColor }}>
+      <header className={`px-4 sm:px-6 py-3 flex items-center justify-between z-50 border-b-2 bg-nitro-cyan/10 border-nitro-cyan/40 shadow-lg backdrop-blur-xl`}>
         <div className="flex items-center gap-2 sm:gap-4">
-            <button onClick={() => { if (currentUser.soundEnabled) playUiSound('click'); setIsChatListOpen(true); }} className="p-2 rounded-xl border transition-all hover:scale-110 active:scale-95 bg-nitro-gray text-nitro-primary">
+            <button onClick={() => setIsChatListOpen(true)} className="p-2 rounded-xl border bg-nitro-gray text-nitro-primary border-white/5">
                 <ICONS.Menu className="w-5 h-5 sm:w-6 h-6" />
             </button>
             <div className="flex items-center gap-2">
                 <ICONS.Nitro className="w-7 h-7 sm:w-8 h-8 neon-primary" />
-                <h1 className="font-orbitron font-black text-sm sm:text-lg tracking-widest block text-white">FC ZONE</h1>
+                <h1 className="font-orbitron font-black text-sm sm:text-lg tracking-widest block text-white hidden sm:block">FC ZONE</h1>
             </div>
         </div>
 
-        {/* Permanent Location Tracker */}
-        <div className="hidden md:flex items-center gap-4 bg-nitro-gray/40 border border-white/5 px-4 py-1.5 rounded-2xl">
-            <div className="flex flex-col items-center">
-                <ICONS.Map className="w-4 h-4 text-nitro-cyan animate-pulse" />
-            </div>
-            <div className="flex flex-col">
-                <span className="text-[7px] font-orbitron font-black text-nitro-cyan uppercase tracking-widest">{location.sector}</span>
-                <span className="text-[8px] font-mono text-gray-500">{location.lat.toFixed(4)}°N, {location.lng.toFixed(4)}°E</span>
-            </div>
+        <div className="flex items-center gap-2">
+            <button 
+                onClick={() => setIsLocationTracking(!isLocationTracking)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all ${isLocationTracking ? 'bg-nitro-magenta/10 border-nitro-magenta text-nitro-magenta animate-pulse' : 'bg-white/5 border-white/10 text-gray-500'}`}
+            >
+                <ICONS.Target className="w-4 h-4" />
+                {isLocationTracking && (
+                    <span className="text-[9px] font-orbitron font-black uppercase whitespace-nowrap">
+                        {trackingData ? `${trackingData.dist} // LOCKED` : 'SCANNING...'}
+                    </span>
+                )}
+            </button>
         </div>
 
-        <div className="flex items-center gap-4">
-             <button onClick={() => { if (currentUser.soundEnabled) playUiSound('click'); setIsRacerProfileOpen(true); }} className="flex items-center gap-2 px-2 py-1.5 rounded-xl border bg-nitro-gray border-white/10 text-nitro-cyan shadow-lg hover:border-nitro-cyan/50 transition-all">
-                <img src={currentUser.avatar} className="w-6 h-6 rounded-full" />
-                <div className="hidden md:block text-left leading-none">
-                    <span className="text-[8px] font-orbitron font-black uppercase">{currentUser.name}</span>
-                </div>
-             </button>
+        <div className="flex items-center gap-2 sm:gap-4">
+            <button onClick={() => { setIsRacerProfileOpen(true); setDashboardTab('engine'); }} className="p-2 rounded-xl border bg-nitro-gray border-white/10 text-nitro-yellow hover:text-white hover:bg-nitro-yellow/20 transition-all shadow-lg" title="Open Garage">
+                <ICONS.Garage className="w-5 h-5 sm:w-6 h-6" />
+            </button>
+
+             <div className="relative" ref={profileMenuRef}>
+                 <button 
+                    onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
+                    className={`flex items-center gap-2 px-2 py-1.5 rounded-xl border bg-nitro-gray border-white/10 text-nitro-cyan shadow-lg hover:border-nitro-cyan transition-all relative ${currentUser.status === 'speeding' ? 'ring-2 ring-nitro-magenta ring-opacity-50' : ''}`}
+                 >
+                    <div className="relative">
+                        <img 
+                            src={currentUser.avatar} 
+                            className="w-6 h-6 rounded-full cursor-pointer" 
+                            onClick={(e) => { e.stopPropagation(); setZoomedImage(currentUser.avatar); }}
+                        />
+                        {currentUser.status === 'speeding' && (
+                            <div className="absolute inset-[-2px] border-2 border-nitro-magenta rounded-full animate-ping pointer-events-none"></div>
+                        )}
+                    </div>
+                    <span className="hidden md:block text-[8px] font-orbitron font-black uppercase">{currentUser.name}</span>
+                 </button>
+
+                 {isProfileMenuOpen && (
+                     <div className="absolute right-0 top-full mt-2 w-48 glass-panel border border-white/10 rounded-2xl shadow-2xl p-2 z-[200] animate-in zoom-in-95 duration-200">
+                         <button 
+                            onClick={() => { setIsRacerProfileOpen(true); setDashboardTab('stats'); setIsProfileMenuOpen(false); }}
+                            className="w-full text-left px-4 py-3 text-[10px] font-orbitron font-black text-gray-300 hover:text-white uppercase hover:bg-white/10 rounded-xl transition-all flex items-center gap-2"
+                         >
+                             <ICONS.Users className="w-4 h-4 text-nitro-cyan" />
+                             My Cockpit
+                         </button>
+                         <div className="h-[1px] bg-white/5 my-1"></div>
+                         
+                         <div className="flex justify-between items-center px-4 py-2 hover:bg-white/5 rounded-xl">
+                             <span className="text-[10px] font-orbitron font-black text-gray-400 uppercase flex items-center gap-2">
+                                 <ICONS.Ghost className="w-4 h-4 text-nitro-magenta" />
+                                 Stealth
+                             </span>
+                             <button 
+                                onClick={() => handleUpdateUser({ stealthMode: !currentUser.stealthMode })}
+                                className={`w-8 h-4 rounded-full transition-all relative ${currentUser.stealthMode ? 'bg-nitro-magenta' : 'bg-white/10'}`}
+                             >
+                                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${currentUser.stealthMode ? 'translate-x-4' : ''}`}></div>
+                             </button>
+                         </div>
+
+                         <div className="flex justify-between items-center px-4 py-2 hover:bg-white/5 rounded-xl">
+                             <span className="text-[10px] font-orbitron font-black text-gray-400 uppercase flex items-center gap-2">
+                                 <ICONS.Music className="w-4 h-4 text-nitro-yellow" />
+                                 Thrum
+                             </span>
+                             <button 
+                                onClick={handleToggleBackgroundMusic}
+                                className={`w-8 h-4 rounded-full transition-all relative ${currentUser.backgroundMusic ? 'bg-nitro-yellow' : 'bg-white/10'}`}
+                             >
+                                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${currentUser.backgroundMusic ? 'translate-x-4' : ''}`}></div>
+                             </button>
+                         </div>
+
+                         <div className="flex justify-between items-center px-4 py-2 hover:bg-white/5 rounded-xl mt-1">
+                             <span className="text-[10px] font-orbitron font-black text-gray-400 uppercase flex items-center gap-2">
+                                 <ICONS.Nitro className="w-4 h-4 text-nitro-magenta" />
+                                 Status
+                             </span>
+                             <button 
+                                onClick={() => handleUpdateUser({ status: currentUser.status === 'speeding' ? 'online' : 'speeding' })}
+                                className={`px-2 py-0.5 rounded text-[8px] font-black uppercase transition-all ${currentUser.status === 'speeding' ? 'bg-nitro-magenta text-white' : 'bg-white/10 text-gray-500'}`}
+                             >
+                                {currentUser.status === 'speeding' ? 'SPEEDING' : 'CRUISING'}
+                             </button>
+                         </div>
+                     </div>
+                 )}
+             </div>
         </div>
       </header>
 
       <div className="flex-1 flex overflow-hidden relative">
-        <main className="flex-1 flex flex-row h-full overflow-hidden">
-          {activeTab === 'chats' ? (
+        <main className="flex-1 flex flex-row h-full overflow-hidden relative">
+          {activeTab === 'chats' && selectedChat ? (
             <ChatWindow 
-                chat={selectedChat} 
+                ref={chatWindowRef}
+                chat={{ ...selectedChat, messages: currentMessages }} 
                 onSendMessage={handleSendMessage} 
-                onDeleteMessage={handleDeleteMessage}
+                onReactToMessage={handleReactToMessage}
+                onDeleteMessage={handleDeleteMessage} 
                 onTogglePinMessage={handleTogglePinMessage}
                 onUpdateExpiryDuration={handleUpdateExpiryDuration}
-                onScheduleMessage={handleScheduleMessage}
-                onSetAlert={handleSetAlert}
-                onCancelScheduledMessage={handleCancelScheduledMessage} 
+                onScheduleMessage={(txt, time) => {
+                    handleSendMessage(`[Auto-Transmission Scheduled: ${new Date(time).toLocaleTimeString()}]`, 'text');
+                    setTimeout(() => handleSendMessage(txt, 'text'), time - Date.now());
+                }}
+                onSetAlert={() => {}}
+                onCancelScheduledMessage={() => {}} 
                 onUpdateWallpaper={handleUpdateWallpaper}
-                customBgColor={chatBgColor} 
-                bubbleColor={currentUser.bubbleColor}
-                voiceProfile={voiceProfile} 
+                customBgColor={chatBgColor}
+                bubbleColor={currentUser.bubbleColor} 
+                voiceProfile={currentUser.voiceGender || 'male'} 
                 autoReadDocs={currentUser.autoReadDocuments || false}
-                onToggleAutoRead={() => setCurrentUser(prev => ({...prev, autoReadDocuments: !prev.autoReadDocuments}))}
+                onToggleAutoRead={() => handleUpdateUser({ autoReadDocuments: !currentUser.autoReadDocuments })}
                 stealthMode={currentUser.stealthMode || false}
-                onToggleStealthMode={() => setCurrentUser(prev => ({...prev, stealthMode: !prev.stealthMode}))}
+                onToggleStealthMode={() => handleUpdateUser({ stealthMode: !currentUser.stealthMode })}
                 soundEnabled={currentUser.soundEnabled || false}
-                onToggleSound={handleToggleSound}
-                onToggleVoice={handleToggleVoice}
-                onLinkDevice={handleLinkDevice}
-                onShareZone={handleShareZone}
-                onOpenSettings={() => setActiveTab('settings')} 
-                onOpenCockpit={() => setIsRacerProfileOpen(true)}
-                isTyping={selectedChat.isTyping} 
+                onToggleSound={() => handleUpdateUser({ soundEnabled: !currentUser.soundEnabled })}
+                onToggleVoice={() => {}}
+                onLinkDevice={() => alert("Searching for available Grid Terminals...")}
+                onShareZone={() => alert("Generating temporary Sector access link...")}
+                onOpenSettings={() => { setIsRacerProfileOpen(true); setDashboardTab('settings'); }}
                 userVoiceFilter={currentUser.voiceFilter}
-                onUpdateVoiceFilter={(f) => setCurrentUser(prev => ({ ...prev, voiceFilter: f }))}
+                onUpdateVoiceFilter={(f) => handleUpdateUser({ voiceFilter: f })}
+                onOpenCockpit={() => { setIsRacerProfileOpen(true); setDashboardTab('stats'); }}
+                autoReadVoice={currentUser.autoReadVoice}
+                autoReadText={currentUser.autoReadText}
+                isTyping={isTyping}
+                isChatbotActive={currentUser.aiCoPilot}
+                onToggleChatbot={() => {
+                    handleUpdateUser({ aiCoPilot: !currentUser.aiCoPilot });
+                    if (currentUser.soundEnabled) playUiSound('click', currentUser.soundPack);
+                }}
             />
-          ) : activeTab === 'family' ? ( <FamilyView /> ) : activeTab === 'zone' ? ( <ZoneView isLightMode={isLightMode} onJoinRoom={handleJoinRoom} onJoinChallenge={handleJoinChallenge} /> ) : activeTab === 'gossip' ? ( <GossipView /> ) : activeTab === 'settings' ? (
-            <div className="flex-1 p-8 overflow-y-auto">
-               <h2 className="font-orbitron text-3xl font-black neon-primary mb-8 uppercase italic">Garage Control</h2>
-               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                   <div className="glass-panel p-6 rounded-3xl space-y-4 border border-white/5">
-                        <h3 className="font-orbitron text-[10px] text-nitro-cyan uppercase font-black tracking-widest">Dashboard Skin</h3>
-                        <input type="color" value={chatBgColor} onChange={(e) => setChatBgColor(e.target.value)} className="w-full h-12 rounded-lg bg-transparent cursor-pointer" />
-                   </div>
-                   <div className="glass-panel p-6 rounded-3xl space-y-4 border border-white/5">
-                        <h3 className="font-orbitron text-[10px] text-nitro-cyan uppercase font-black tracking-widest">Voice Pilot</h3>
-                        <div className="flex gap-2">
-                            {['off', 'male', 'female'].map(p => (
-                                <button key={p} onClick={() => setVoiceProfile(p as any)} className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase ${voiceProfile === p ? 'bg-nitro-primary text-nitro-black' : 'bg-white/5 text-gray-500'}`}>{p}</button>
-                            ))}
-                        </div>
-                   </div>
-               </div>
+          ) : activeTab === 'chats' ? (
+            <div className="flex-1 flex items-center justify-center text-gray-500 font-orbitron text-xs animate-pulse italic">
+                Awaiting mission selection from roster...
             </div>
-          ) : null}
+          ) : activeTab === 'family' ? ( <FamilyView /> ) : activeTab === 'zone' ? ( <ZoneView isLightMode={false} onJoinRoom={() => {}} onJoinChallenge={() => {}} /> ) : activeTab === 'gossip' ? ( <GossipView /> ) : null}
+        
+          {analysisResult && (
+              <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-[60] animate-in slide-in-from-bottom-4 w-11/12 max-w-sm">
+                  <div className="bg-nitro-black/90 backdrop-blur-xl border border-nitro-magenta/50 rounded-3xl p-5 shadow-[0_0_30px_rgba(255,0,60,0.3)]">
+                      <div className="flex justify-between items-start mb-3">
+                          <h4 className="font-orbitron font-black text-nitro-magenta uppercase tracking-widest text-xs flex items-center gap-2">
+                              <ICONS.Activity className="w-4 h-4" /> Live Analysis
+                          </h4>
+                          <button onClick={() => setAnalysisResult(null)} className="text-gray-500 hover:text-white">✕</button>
+                      </div>
+                      <div className="space-y-2">
+                          <div className="flex justify-between border-b border-white/10 pb-1">
+                              <span className="text-[10px] text-gray-400 font-bold uppercase">Detected Mood</span>
+                              <span className="text-[10px] text-white font-orbitron">{analysisResult.mood}</span>
+                          </div>
+                          <div className="flex justify-between border-b border-white/10 pb-1">
+                              <span className="text-[10px] text-gray-400 font-bold uppercase">Typing Style</span>
+                              <span className="text-[10px] text-white font-orbitron">{analysisResult.style}</span>
+                          </div>
+                          <div className="flex justify-between">
+                              <span className="text-[10px] text-gray-400 font-bold uppercase">Intent</span>
+                              <span className="text-[10px] text-nitro-cyan font-orbitron">{analysisResult.intent}</span>
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          )}
         </main>
 
         <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] transition-opacity duration-300 ${isChatListOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setIsChatListOpen(false)} />
@@ -337,28 +704,136 @@ const App: React.FC = () => {
              <h3 className="font-orbitron font-black text-nitro-cyan tracking-widest text-xs uppercase">Active Roster</h3>
              <button onClick={() => setIsChatListOpen(false)} className="p-2 text-white">✕</button>
           </div>
-          <ChatList chats={chats} selectedChatId={selectedChatId} onSelectChat={handleSelectChat} />
+          <ChatList 
+            chats={chats} 
+            selectedChatId={selectedChatId} 
+            onSelectChat={handleSelectChat} 
+            onTogglePin={handleTogglePinChat}
+            currentUser={currentUser}
+            onViewImage={setZoomedImage}
+          />
         </div>
 
-        <Dashboard user={currentUser} isOpen={isRacerProfileOpen} onClose={() => setIsRacerProfileOpen(false)} isLightMode={isLightMode} onUpdateUser={(data) => setCurrentUser(prev => ({...prev, ...data}))} />
+        <Dashboard 
+            user={currentUser} 
+            isOpen={isRacerProfileOpen} 
+            onClose={() => setIsRacerProfileOpen(false)} 
+            isLightMode={false} 
+            onUpdateUser={handleUpdateUser}
+            onUpgrade={() => { setIsRacerProfileOpen(false); setIsSubscriptionOpen(true); }}
+            activeTab={dashboardTab}
+            salvagedMessages={trashMessages}
+            onRestoreMessage={handleRestoreMessage}
+            onPermanentDelete={handlePermanentDelete}
+            onEmptySalvage={handleEmptySalvage}
+        />
+
+        {isHistoryOpen && <CallHistoryModal onClose={() => setIsHistoryOpen(false)} />}
+        {isSubscriptionOpen && <SubscriptionModal onClose={() => setIsSubscriptionOpen(false)} />}
+        
+        {zoomedImage && (
+            <div className="fixed inset-0 z-[1000] bg-black/90 backdrop-blur-sm flex items-center justify-center animate-in fade-in duration-200" onClick={() => setZoomedImage(null)}>
+                <div className="relative" onClick={(e) => e.stopPropagation()}>
+                    <div className="absolute inset-0 bg-nitro-cyan/20 blur-xl rounded-full"></div>
+                    <img 
+                        src={zoomedImage} 
+                        className="w-48 h-48 rounded-full border-4 border-nitro-cyan shadow-[0_0_50px_rgba(0,243,255,0.4)] object-cover relative z-10 animate-in zoom-in-50 duration-300" 
+                    />
+                    {currentUser?.status === 'speeding' && zoomedImage === currentUser.avatar && (
+                        <div className="absolute inset-[-10px] border-4 border-nitro-magenta/50 rounded-full animate-ping z-0 pointer-events-none"></div>
+                    )}
+                </div>
+                <button onClick={() => setZoomedImage(null)} className="absolute top-10 right-10 text-white hover:text-nitro-cyan p-4">✕</button>
+            </div>
+        )}
+
+        {isMoreToolsOpen && (
+            <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-nitro-black/95 backdrop-blur-2xl animate-in zoom-in-95 duration-300">
+                <div className="w-full max-w-2xl max-h-[85vh] overflow-y-auto hide-scrollbar bg-nitro-gray/50 border border-nitro-primary/20 rounded-[48px] p-8 shadow-2xl">
+                    <div className="flex justify-between items-center mb-10">
+                        <div className="flex items-center gap-3">
+                            <ICONS.Tuning className="w-8 h-8 text-nitro-cyan neon-primary" />
+                            <h2 className="font-orbitron font-black text-2xl text-white uppercase italic tracking-tighter">Nitro <span className="text-nitro-cyan">Protocols</span></h2>
+                        </div>
+                        <button onClick={() => setIsMoreToolsOpen(false)} className="w-12 h-12 bg-white/5 rounded-full flex items-center justify-center text-gray-500 hover:text-white transition-all">✕</button>
+                    </div>
+
+                    <div className="space-y-10">
+                        <div className="bg-white/5 p-4 rounded-3xl border border-white/5 mb-6">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="p-2 bg-nitro-magenta/20 rounded-full text-nitro-magenta"><ICONS.Ai className="w-5 h-5" /></div>
+                                    <div>
+                                        <h4 className="font-orbitron font-black text-white uppercase text-sm">Nitro AI Co-Pilot</h4>
+                                        <p className="text-[10px] text-gray-500">Auto-reply & strategic race insights.</p>
+                                    </div>
+                                </div>
+                                <button 
+                                    onClick={() => handleToolTrigger('ai-copilot')} 
+                                    className={`w-10 h-5 rounded-full transition-all relative ${currentUser.aiCoPilot ? 'bg-nitro-magenta' : 'bg-white/10'}`}
+                                >
+                                    <div className={`absolute top-1 left-1 w-3 h-3 bg-white rounded-full transition-transform ${currentUser.aiCoPilot ? 'translate-x-5' : ''}`}></div>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                            {[
+                                { id: 'nitro', label: 'Nitro Boost', icon: <ICONS.Nitro />, color: 'text-nitro-magenta', bg: 'hover:bg-nitro-magenta/10' },
+                                { id: 'translate', label: 'Translator', icon: <ICONS.Translate />, color: 'text-nitro-cyan', bg: 'hover:bg-nitro-cyan/10' },
+                                { id: 'analyzer', label: 'Context Intel', icon: <ICONS.Activity />, color: 'text-nitro-yellow', bg: 'hover:bg-nitro-yellow/10' },
+                                { id: 'timer', label: 'Auto-Send', icon: <ICONS.Clock />, color: 'text-nitro-green', bg: 'hover:bg-nitro-green/10' },
+                                { id: 'upload', label: 'Encrypted Upload', icon: <ICONS.File />, color: 'text-gray-300', bg: 'hover:bg-white/10' },
+                                { id: 'cockpit', label: 'My Cockpit', icon: <ICONS.Users />, color: 'text-white', bg: 'hover:bg-white/5' },
+                                { id: 'history', label: 'Comms Log', icon: <ICONS.History />, color: 'text-gray-400', bg: 'hover:bg-white/5' },
+                                { id: 'mood-scanner', label: 'Vibe Scan', icon: <ICONS.Eye />, color: 'text-nitro-magenta', bg: 'hover:bg-nitro-magenta/10' },
+                                { id: 'location', label: 'Ping Location', icon: <ICONS.Target />, color: 'text-nitro-cyan', bg: 'hover:bg-nitro-cyan/10' },
+                                { id: 'ai-activation', label: 'Wake AI', icon: <ICONS.Ai />, color: 'text-white', bg: 'hover:bg-white/10' },
+                            ].map(tool => (
+                                <button 
+                                    key={tool.id}
+                                    onClick={() => handleToolTrigger(tool.id)}
+                                    className={`flex flex-col items-center justify-center p-6 bg-white/5 border border-white/5 rounded-3xl transition-all ${tool.bg} hover:border-white/20 group`}
+                                >
+                                    <div className={`mb-3 ${tool.color} transition-transform group-hover:scale-110`}>
+                                        {React.cloneElement(tool.icon as React.ReactElement, { className: "w-6 h-6" })}
+                                    </div>
+                                    <span className="text-[9px] font-orbitron font-black uppercase text-gray-300 group-hover:text-white tracking-wider">{tool.label}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
+
       </div>
 
-      <nav className={`h-20 flex items-center justify-center gap-2 px-4 z-[70] backdrop-blur-2xl border-t-2 transition-all duration-500 ${isRedTheme ? 'bg-nitro-magenta/10 border-nitro-magenta/40' : 'bg-nitro-cyan/10 border-nitro-cyan/40'} shadow-lg`}>
+      <nav className={`px-2 py-2 flex justify-around items-center border-t-2 z-50 bg-nitro-black border-nitro-gray`}>
         {[
-          { id: 'chats', icon: <ICONS.Send className="w-5 h-5 sm:w-6 h-6" />, label: 'Chats' },
-          { id: 'family', icon: <ICONS.Family className="w-5 h-5 sm:w-6 h-6" />, label: 'Family' },
-          { id: 'zone', icon: <ICONS.Trophy className="w-5 h-5 sm:w-6 h-6" />, label: 'Zone' },
-          { id: 'gossip', icon: <ICONS.Gossip className="w-5 h-5 sm:w-6 h-6" />, label: 'Gossip' },
-          { id: 'settings', icon: <ICONS.Settings className="w-5 h-5 sm:w-6 h-6" />, label: 'Control' },
-        ].map((tab) => (
-          <button key={tab.id} onClick={() => setActiveTab(tab.id as any)} className={`flex flex-col items-center gap-1 p-2 min-w-[50px] transition-all ${activeTab === tab.id ? 'neon-primary scale-110' : 'text-gray-500 hover:text-gray-300'}`}>
-            {tab.icon}
-            <span className={`text-[8px] font-orbitron font-black uppercase transition-all duration-300 ${activeTab === tab.id ? 'opacity-100' : 'opacity-0'}`}>{tab.label}</span>
+          { id: 'chats', icon: ICONS.Send, label: 'Comms' },
+          { id: 'family', icon: ICONS.Family, label: 'Crew' },
+          { id: 'zone', icon: ICONS.Globe, label: 'Zone' },
+          { id: 'gossip', icon: ICONS.Gossip, label: 'Intel' },
+          { id: 'tools', icon: ICONS.Apps, label: 'Protocols' },
+        ].map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => { 
+                if (tab.id === 'tools') {
+                    setIsMoreToolsOpen(true);
+                } else {
+                    setActiveTab(tab.id as any); 
+                }
+                if (currentUser?.soundEnabled) playUiSound('click', currentUser.soundPack); 
+            }}
+            className={`flex flex-col items-center gap-1 p-2 rounded-2xl transition-all w-16 ${activeTab === tab.id ? 'text-nitro-cyan bg-nitro-cyan/10' : 'text-gray-500 hover:text-gray-300'}`}
+          >
+            <tab.icon className={`w-5 h-5 ${activeTab === tab.id || (tab.id === 'tools' && isMoreToolsOpen) ? 'animate-pulse' : ''}`} />
+            <span className="text-[8px] font-orbitron font-black uppercase tracking-wider">{tab.label}</span>
           </button>
         ))}
       </nav>
     </div>
   );
 };
-
-export default App;

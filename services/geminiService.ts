@@ -1,7 +1,7 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 
-// Fix: Directly utilizing process.env.API_KEY for SDK initialization
+// Directly utilizing process.env.API_KEY for SDK initialization
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export const analyzeRacerMood = async (bio: string, recentActivity: string): Promise<{ mood: string, color: string, analysis: string }> => {
@@ -71,23 +71,6 @@ export const getContextIntelligence = async (messages: string[]): Promise<string
   }
 };
 
-export const getDeepFileInsights = async (fileName: string, content: string): Promise<string> => {
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-pro-preview",
-      contents: `You are the Nitro Data Forensics Engine. Perform a deep scan of the document "${fileName}". 
-      Extract:
-      1. Technical Specs (if any)
-      2. Mission Objectives
-      3. Hidden Risks
-      Format as a structured report with high-octane headers. Keep it concise and professional for a race pilot.\n\nContent:\n${content}`,
-    });
-    return response.text || "Forensics failed. Data corrupt.";
-  } catch (error) {
-    return "Scanner overheated during deep file analysis.";
-  }
-};
-
 export const nitroAssistantQuery = async (query: string): Promise<string> => {
   try {
     const response = await ai.models.generateContent({
@@ -104,6 +87,77 @@ export const nitroAssistantQuery = async (query: string): Promise<string> => {
   }
 };
 
+export const smartZoneQuery = async (query: string): Promise<string> => {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Perform the following task at high velocity:
+      Input: "${query}"
+      
+      Tasks supported: 
+      - Solve Math: Show steps clearly.
+      - Solve Riddle: Provide the answer and a brief explanation.
+      - Word Check: Check if written or spoken correctly, fix any spelling/grammar, and verify pronunciation phonetically if requested.
+      
+      Format as a concise, high-octane "Solution Briefing". Use Nitro/Racing metaphors where possible.`,
+    });
+    return response.text || "Smart Zone processing failed.";
+  } catch (e) {
+    return "Smart Zone logic engine overheated.";
+  }
+};
+
+export const fetchLiveSportsData = async (): Promise<string> => {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: "Find real-time sports scores for major matches happening right now or recently. Include details like attacking performance, goals/points, and current match status. Format as a clean list for a racing HUD.",
+      config: {
+        tools: [{ googleSearch: {} }]
+      }
+    });
+    return response.text || "No live matches detected in the grid.";
+  } catch (e) {
+    return "Uplink to Sports Arena interrupted.";
+  }
+};
+
+export const generateNitroBotResponse = async (history: string[], lastUserMessage: string): Promise<string> => {
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: `You are "Nitro Bot", a high-performance AI assistant in a racing chat app. You are helpful, cool, and use racing metaphors.
+            
+            Conversation History:
+            ${history.slice(-5).join("\n")}
+            
+            User just said: "${lastUserMessage}"
+            
+            Respond directly to the user. Keep it under 2 sentences. Be helpful but cool.`,
+        });
+        return response.text || "Ignition failure. Say again?";
+    } catch (e) {
+        return "Nitro Bot system overload.";
+    }
+};
+
+export const refineDraftMessage = async (draft: string, intent: 'fix' | 'translate' | 'style'): Promise<string> => {
+    try {
+        let prompt = "";
+        if (intent === 'fix') prompt = `Fix grammar and spelling for this text, keep it concise: "${draft}"`;
+        if (intent === 'translate') prompt = `Translate this text to English (or to Spanish if already English): "${draft}"`;
+        if (intent === 'style') prompt = `Rewrite this text to sound like a Fast & Furious street racer (cool, slang, energetic): "${draft}"`;
+
+        const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: prompt
+        });
+        return response.text?.replace(/^"|"$/g, '') || draft;
+    } catch (e) {
+        return draft;
+    }
+};
+
 export const translateMessage = async (text: string): Promise<string> => {
   try {
     const response = await ai.models.generateContent({
@@ -116,11 +170,90 @@ export const translateMessage = async (text: string): Promise<string> => {
   }
 };
 
-export const analyzeDocument = async (fileName: string, fileContent: string): Promise<string> => {
+export const analyzeSentimentAndStyle = async (text: string): Promise<{ mood: string, style: string, intent: string }> => {
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `You are the Nitro Document Analyst. Analyze this document named "${fileName}". Provide a high-speed, punchy summary suitable for being read aloud by a racing pilot. Focus on the core mission objectives. Keep it under 40 words.\n\nContent: ${fileContent}`,
+      contents: `Analyze the following text message for a high-speed racing context.
+      Input: "${text}"
+      
+      Return a JSON object with:
+      1. mood: One word emotion (e.g. "Aggressive", "Calm", "Panicked").
+      2. style: Typing style description (e.g. "Rapid Fire", "Hesitant", "Precise").
+      3. intent: The underlying goal (e.g. "Challenge", "Information", "Support").
+      `,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            mood: { type: Type.STRING },
+            style: { type: Type.STRING },
+            intent: { type: Type.STRING }
+          }
+        }
+      }
+    });
+    return JSON.parse(response.text || "{}");
+  } catch (error) {
+    return { mood: "Unknown", style: "Encrypted", intent: "Hidden" };
+  }
+};
+
+export const transcribeAudio = async (base64Audio: string, mimeType: string): Promise<string> => {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: {
+        parts: [
+            { inlineData: { mimeType, data: base64Audio } },
+            { text: "Transcribe this audio message. Return only the transcription text." }
+        ]
+      }
+    });
+    return response.text || "";
+  } catch (e) {
+    console.error("Transcription error:", e);
+    return "";
+  }
+};
+
+export const generateOfflineReply = async (senderName: string, recipientName: string, lastMessage: string): Promise<string> => {
+  try {
+    const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `You are simulating an offline auto-responder for "${recipientName}". "${senderName}" just sent: "${lastMessage}".
+        Generate a short, cool, in-character message saying that ${recipientName} is currently offline/racing/busy but the system has logged the message. Use "Fast & Furious" style slang. Do not add quotes.`,
+    });
+    return response.text || `${recipientName} is offline. Message cached.`;
+  } catch (e) {
+      return "User offline. System acknowledgment.";
+  }
+};
+
+export const analyzeDocument = async (fileName: string, fileData: string, mimeType?: string): Promise<string> => {
+  try {
+    let contents: any;
+
+    if (mimeType && (mimeType.includes('pdf') || mimeType.includes('image'))) {
+        contents = {
+            parts: [
+                { text: `You are the Nitro Document Analyst. Analyze this file named "${fileName}". Provide a high-speed, punchy summary suitable for being read aloud by a racing pilot. Focus on the core mission objectives or data points. Keep it under 50 words.` },
+                {
+                    inlineData: {
+                        mimeType: mimeType,
+                        data: fileData
+                    }
+                }
+            ]
+        };
+    } else {
+        contents = `You are the Nitro Document Analyst. Analyze this document named "${fileName}". Provide a high-speed, punchy summary suitable for being read aloud by a racing pilot. Focus on the core mission objectives. Keep it under 40 words.\n\nContent: ${fileData}`;
+    }
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: contents,
     });
     return response.text || "Document analysis failed. Sector data corrupt.";
   } catch (error) {
@@ -133,8 +266,9 @@ export const smartSearch = async (query: string): Promise<string> => {
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Perform a high-speed search analysis for this query: "${query}". Provide a concise (under 20 words), high-octane response. If it's a general question, answer as a racing expert. If it's a name, give a "racer profile" blurb.`,
+      contents: `Perform a high-speed search analysis for this query: "${query}". Provide a concise (under 40 words), high-octane response. Use racer terminology. Include grounding facts if possible.`,
       config: {
+        tools: [{ googleSearch: {} }],
         systemInstruction: "You are the 'Nitro Search Engine'. You don't just find results, you give high-performance insights."
       }
     });
@@ -232,3 +366,63 @@ export const summarizeChat = async (messages: string[]): Promise<string> => {
       return "Unable to summarize at high speed.";
     }
 }
+
+export const performWebSearch = async (query: string): Promise<string> => {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: query,
+      config: {
+        tools: [{ googleSearch: {} }],
+        systemInstruction: "You are the Nitro Web Scanner. Perform a Google Search for the user query. Extract the most relevant result and present it as a concise, high-tech intelligence briefing. Keep it under 40 words. If multiple links found, just give the top summary."
+      }
+    });
+    return response.text || "Search grid offline. No data found.";
+  } catch (error) {
+    return "Connection blocked by firewall. Search failed.";
+  }
+};
+
+/**
+ * Interprets a natural language command from the racer and maps it to a system action.
+ * Supports toggling sound, reading messages, starting calls, setting alarms, and toggling stealth mode.
+ */
+export const interpretUserCommand = async (query: string): Promise<{ action: string, params?: any, feedback: string }> => {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `You are the 'Nitro Crew Chief' terminal. Interpret the following command: "${query}"
+      
+      Actions available:
+      1. TOGGLE_SOUND: params { state: boolean } - Enable/disable system audio.
+      2. READ_LAST_MESSAGE: no params - Read the latest transmission.
+      3. START_CALL: params { targetName: string } - Open comms with another racer.
+      4. SET_ALARM: params { time: string } - Set a countdown or reminder.
+      5. TOGGLE_STEALTH: params { state: boolean } - Enable/disable low-profile mode.
+      
+      Return a JSON object with 'action', optional 'params', and a 'feedback' message in racer slang.`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            action: { type: Type.STRING },
+            params: {
+              type: Type.OBJECT,
+              properties: {
+                state: { type: Type.BOOLEAN },
+                targetName: { type: Type.STRING },
+                time: { type: Type.STRING }
+              }
+            },
+            feedback: { type: Type.STRING }
+          },
+          required: ["action", "feedback"]
+        }
+      }
+    });
+    return JSON.parse(response.text || '{"action": "UNKNOWN", "feedback": "Signal scrambled. Repeat command."}');
+  } catch (error) {
+    return { action: "UNKNOWN", feedback: "Terminal uplink failed. Manual override required." };
+  }
+};

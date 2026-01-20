@@ -7,6 +7,7 @@ export enum ChatType {
 
 export type VoiceProfile = 'off' | 'male' | 'female';
 export type ExpiryDuration = 'off' | '24h' | '1w' | '1m';
+export type SoundPack = 'standard' | 'retro' | 'clean';
 
 export interface VoiceFilter {
   pitch: number;    // 0.5 to 2.0
@@ -25,12 +26,16 @@ export interface Message {
   isAi?: boolean;
   isPinned?: boolean;
   expiryTimestamp?: number;
+  reactions?: Record<string, string[]>; // emoji -> userIds[]
   fileData?: {
     name: string;
     size: number;
     mimeType: string;
     content?: string;
   };
+  // Trash bin metadata
+  originalChatId?: string;
+  deletedAt?: number;
 }
 
 export interface ScheduledMessage extends Message {
@@ -68,13 +73,22 @@ export interface User {
   password?: string;
   isVerified?: boolean;
   stealthMode?: boolean;
+  backgroundMusic?: boolean;
+  soundPack?: SoundPack;
   bio?: string;
   autoReadDocuments?: boolean;
+  autoReadVoice?: boolean;
+  autoReadText?: boolean;
+  voiceGender?: 'male' | 'female';
+  appVersion?: string; 
   soundEnabled?: boolean;
   bubbleColor?: string;
   lowBandwidthMode?: boolean;
   voiceFilter: VoiceFilter;
   voicePresets: Record<string, VoiceFilter>;
+  aiCoPilot?: boolean;
+  customInviteCode?: string;
+  themePreference?: string;
 }
 
 export interface Chat {
@@ -92,6 +106,7 @@ export interface Chat {
   isTyping?: boolean;
   wallpaper?: string;
   expiryDuration?: ExpiryDuration;
+  isPinned?: boolean;
 }
 
 export interface Room {

@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Modality } from "@google/genai";
-import { VoiceProfile, VoiceFilter } from "../types";
+import { VoiceProfile, VoiceFilter, SoundPack } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
@@ -34,6 +34,9 @@ async function decodeAudioData(
 }
 
 let currentAudioSource: AudioBufferSourceNode | null = null;
+let backgroundOscillators: OscillatorNode[] = [];
+let backgroundGain: GainNode | null = null;
+let backgroundFilter: BiquadFilterNode | null = null;
 
 export const speakText = async (text: string, profile: VoiceProfile, filter?: VoiceFilter) => {
   if (profile === 'off' || !text) return;
@@ -113,7 +116,7 @@ export const speakText = async (text: string, profile: VoiceProfile, filter?: Vo
   }
 };
 
-export const playUiSound = (type: 'send' | 'receive' | 'levelUp' | 'click' | 'nitro' | 'alarm') => {
+export const playUiSound = (type: 'send' | 'receive' | 'levelUp' | 'click' | 'nitro' | 'alarm', pack: SoundPack = 'standard') => {
   const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
   const oscillator = audioCtx.createOscillator();
   const gainNode = audioCtx.createGain();
@@ -123,11 +126,39 @@ export const playUiSound = (type: 'send' | 'receive' | 'levelUp' | 'click' | 'ni
 
   const now = audioCtx.currentTime;
 
+  if (pack === 'retro') {
+      // 8-Bit / Square wave style
+      oscillator.type = 'square';
+      if (type === 'send') {
+          oscillator.frequency.setValueAtTime(440, now);
+          oscillator.frequency.linearRampToValueAtTime(880, now + 0.1);
+          gainNode.gain.setValueAtTime(0.1, now);
+          gainNode.gain.linearRampToValueAtTime(0, now + 0.1);
+          oscillator.start(now);
+          oscillator.stop(now + 0.1);
+      } else if (type === 'click') {
+          oscillator.frequency.setValueAtTime(1000, now);
+          gainNode.gain.setValueAtTime(0.05, now);
+          gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.03);
+          oscillator.start(now);
+          oscillator.stop(now + 0.03);
+      } else {
+          // Fallback generic retro sound
+          oscillator.frequency.setValueAtTime(220, now);
+          oscillator.frequency.linearRampToValueAtTime(660, now + 0.2);
+          gainNode.gain.setValueAtTime(0.1, now);
+          oscillator.start(now);
+          oscillator.stop(now + 0.2);
+      }
+      return;
+  }
+
+  // Standard & Clean profiles
   if (type === 'send') {
-    oscillator.type = 'sine';
+    oscillator.type = pack === 'clean' ? 'sine' : 'sine';
     oscillator.frequency.setValueAtTime(800, now);
     oscillator.frequency.exponentialRampToValueAtTime(400, now + 0.1);
-    gainNode.gain.setValueAtTime(0.3, now);
+    gainNode.gain.setValueAtTime(pack === 'clean' ? 0.1 : 0.2, now);
     gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
     oscillator.start(now);
     oscillator.stop(now + 0.1);
@@ -135,7 +166,7 @@ export const playUiSound = (type: 'send' | 'receive' | 'levelUp' | 'click' | 'ni
     oscillator.type = 'sine';
     oscillator.frequency.setValueAtTime(400, now);
     oscillator.frequency.exponentialRampToValueAtTime(800, now + 0.1);
-    gainNode.gain.setValueAtTime(0.3, now);
+    gainNode.gain.setValueAtTime(0.2, now);
     gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
     oscillator.start(now);
     oscillator.stop(now + 0.1);
@@ -154,7 +185,7 @@ export const playUiSound = (type: 'send' | 'receive' | 'levelUp' | 'click' | 'ni
     oscillator.frequency.setValueAtTime(100, now);
     oscillator.frequency.exponentialRampToValueAtTime(1000, now + 0.5);
     oscillator.frequency.exponentialRampToValueAtTime(200, now + 1.0);
-    gainNode.gain.setValueAtTime(0.2, now);
+    gainNode.gain.setValueAtTime(0.1, now);
     gainNode.gain.exponentialRampToValueAtTime(0.01, now + 1.0);
     oscillator.start(now);
     oscillator.stop(now + 1.0);
@@ -165,19 +196,82 @@ export const playUiSound = (type: 'send' | 'receive' | 'levelUp' | 'click' | 'ni
     oscillator.frequency.linearRampToValueAtTime(880, now + 0.2);
     oscillator.frequency.linearRampToValueAtTime(1760, now + 0.3);
     oscillator.frequency.linearRampToValueAtTime(880, now + 0.4);
-    gainNode.gain.setValueAtTime(0.2, now);
-    gainNode.gain.linearRampToValueAtTime(0.3, now + 0.1);
-    gainNode.gain.linearRampToValueAtTime(0.2, now + 0.2);
-    gainNode.gain.linearRampToValueAtTime(0.3, now + 0.3);
+    gainNode.gain.setValueAtTime(0.1, now);
+    gainNode.gain.linearRampToValueAtTime(0.2, now + 0.1);
+    gainNode.gain.linearRampToValueAtTime(0.1, now + 0.2);
+    gainNode.gain.linearRampToValueAtTime(0.2, now + 0.3);
     gainNode.gain.linearRampToValueAtTime(0.01, now + 0.8);
     oscillator.start(now);
     oscillator.stop(now + 0.8);
   } else {
+    // Click
     oscillator.type = 'sine';
     oscillator.frequency.setValueAtTime(1200, now);
-    gainNode.gain.setValueAtTime(0.1, now);
+    gainNode.gain.setValueAtTime(pack === 'clean' ? 0.03 : 0.05, now);
     gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.05);
     oscillator.start(now);
     oscillator.stop(now + 0.05);
   }
+};
+
+export const toggleEngineHum = (enable: boolean) => {
+    // Stop existing sounds
+    if (backgroundGain) {
+        backgroundGain.gain.exponentialRampToValueAtTime(0.001, window.AudioContext ? new window.AudioContext().currentTime + 0.5 : 0);
+        backgroundOscillators.forEach(osc => {
+            try { osc.stop(new window.AudioContext().currentTime + 0.5); } catch(e) {}
+        });
+        backgroundOscillators = [];
+        backgroundGain = null;
+        backgroundFilter = null;
+    }
+
+    if (!enable) return;
+
+    try {
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        
+        // Main Gain - Lower volume for ambient background
+        backgroundGain = audioCtx.createGain();
+        backgroundGain.gain.setValueAtTime(0.08, audioCtx.currentTime); 
+        
+        // Lowpass Filter - Cuts harsh high frequencies to create a "muffled" engine sound
+        backgroundFilter = audioCtx.createBiquadFilter();
+        backgroundFilter.type = "lowpass";
+        backgroundFilter.frequency.setValueAtTime(120, audioCtx.currentTime); // Cutoff at 120Hz for deep rumble
+        backgroundFilter.Q.value = 1;
+
+        backgroundGain.connect(backgroundFilter);
+        backgroundFilter.connect(audioCtx.destination);
+
+        // Oscillator 1: The deep rumble (Sawtooth)
+        const osc1 = audioCtx.createOscillator();
+        osc1.type = 'sawtooth';
+        osc1.frequency.setValueAtTime(55, audioCtx.currentTime); 
+        osc1.connect(backgroundGain);
+        osc1.start();
+        backgroundOscillators.push(osc1);
+
+        // Oscillator 2: LFO (Low Frequency Oscillator) to modulate pitch slightly for "idling" effect
+        const lfo = audioCtx.createOscillator();
+        lfo.type = 'sine';
+        lfo.frequency.setValueAtTime(4, audioCtx.currentTime); // 4Hz idling pulse
+        const lfoGain = audioCtx.createGain();
+        lfoGain.gain.value = 2; // Modulate pitch by +/- 2Hz
+        lfo.connect(lfoGain);
+        lfoGain.connect(osc1.frequency); // Connect LFO to main oscillator pitch
+        lfo.start();
+        backgroundOscillators.push(lfo);
+
+        // Oscillator 3: Sub-bass filler
+        const osc3 = audioCtx.createOscillator();
+        osc3.type = 'sine';
+        osc3.frequency.setValueAtTime(40, audioCtx.currentTime);
+        osc3.connect(backgroundGain);
+        osc3.start();
+        backgroundOscillators.push(osc3);
+
+    } catch (e) {
+        console.error("Audio Context prevented auto-play", e);
+    }
 };
